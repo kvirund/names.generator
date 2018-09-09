@@ -20,7 +20,7 @@ constexpr item_t ZERO = '\0';
 
 struct State
 {
-	constexpr static int ORDER = 4;
+	constexpr static int ORDER = 3;
 
 	struct Hash
 	{
@@ -494,7 +494,7 @@ void enumerate(MarkovChain& chain, const samples_t& samples)
 
 		if (used.find(name) == used.end())
 		{
-			std::cout << (++count) << ". " << name << std::endl;
+			std::cout << name << std::endl;
 		}
 		++i;
 	}
