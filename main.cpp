@@ -2,9 +2,13 @@
 #include <unordered_map>
 #include <list>
 #include <map>
+#include <iomanip>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <algorithm>
+#include <stack>
 
 #include <cstdlib>
 #include <ctime>
@@ -16,7 +20,7 @@ constexpr item_t ZERO = '\0';
 
 struct State
 {
-	constexpr static int ORDER = 1;
+	constexpr static int ORDER = 4;
 
 	struct Hash
 	{
@@ -28,7 +32,10 @@ struct State
 	char operator()(const std::size_t n) const { return m_state[ORDER - n - 1]; }
 	bool operator==(const State& other) const;
 
-	void push(const item_t& item);
+	std::ostream& dump(std::ostream& os) const;
+
+	item_t push_back(const item_t& item);
+	item_t push_front(const item_t& item);
 
 private:
 	item_t m_state[ORDER];
@@ -78,118 +85,337 @@ bool State::operator==(const State& other) const
 	return true;
 }
 
-void State::push(const item_t& item)
+std::ostream& State::dump(std::ostream& os) const
 {
+	for (const auto& i : m_state)
+	{
+		os << std::hex << " 0x" << std::setw(2) << std::setfill('0')
+			<< static_cast<unsigned>(static_cast<unsigned char>(i));
+	}
+
+	return os;
+}
+
+item_t State::push_back(const item_t& item)
+{
+	const item_t result = m_state[0];
+
 	for (std::size_t i = 0; 1 + i != ORDER; ++i)
 	{
 		m_state[i] = m_state[1 + i];
 	}
 
 	m_state[ORDER - 1] = item;
+
+	return result;
 }
 
-class MarkovGraph
+item_t State::push_front(const item_t& item)
+{
+	const item_t result = m_state[ORDER - 1];
+
+	for (std::size_t i = ORDER - 1; i != 0; --i)
+	{
+		m_state[i] = m_state[i - 1];
+	}
+
+	m_state[0] = item;
+
+	return result;
+}
+
+class MarkovChain
 {
 public:
-	template<typename T>
-	MarkovGraph(const T& iterable);
+	class Transition
+	{
+	public:
+		using frequency_t = std::pair<item_t, int>;
+		using frequencies_t = std::vector<frequency_t>;
 
-	bool generate();
+		Transition() : m_count(0) {}
+
+		void add(const item_t& item);
+		int count() const { return m_count; }
+
+		bool operator==(const Transition& rhv) const;
+
+		frequencies_t::const_iterator begin() const;
+		frequencies_t::const_iterator end() const;
+
+	private:
+		void build_frequencies() const;
+
+		int m_count;
+		std::unordered_map<item_t, int> m_item_to_frequency;
+		mutable frequencies_t m_frequencies;
+	};
+
+	using transition_t = Transition;
+
+	class Iterator
+	{
+	public:
+		Iterator(const MarkovChain& m_chain);
+		Iterator(const MarkovChain& chain, const int min, const int max);
+
+		void operator++();
+		bool operator==(const Iterator& rhv) const { return m_position == rhv.m_position; }
+		bool operator!=(const Iterator& rhv) const { return !(*this == rhv); }
+
+		std::string operator*() const;
+
+	private:
+		using lever_t = std::pair<const transition_t&, transition_t::frequencies_t::const_iterator>;
+
+		void roll();
+		void dive();
+
+		const MarkovChain& m_chain;
+
+		std::size_t m_min;
+		std::size_t m_max;
+
+		std::stack<item_t> m_popped;
+		State m_state;
+		std::list<lever_t> m_position;
+	};
+
+	template<typename T>
+	MarkovChain(const T& iterable);
+
+	void random();
+
+	Iterator begin(int min, int max) const { return Iterator(*this, min, max); }
+	Iterator end() const { return Iterator(*this); }
 
 private:
-	using transition_t = std::unordered_map<item_t, int>;
-
 	void add_state(const State& state, const item_t& i);
 	void add_input(const input_t& input);
 
 	void iteration(std::string& result) const;
-	bool check(const std::string& name) const;
 
-	std::unordered_map<State, transition_t, State::Hash> m_graph;
-	std::unordered_set<std::string> used;
+	const transition_t& transition(const State& state) const { return m_chain.at(state); }
+
+	std::unordered_map<State, transition_t, State::Hash> m_chain;
 };
 
+MarkovChain::Iterator::Iterator(const MarkovChain& chain, const int min, const int max) :
+	m_chain(chain),
+	m_min(min),
+	m_max(max)
+{
+	const transition_t& transition = m_chain.transition(m_state);
+	m_position.emplace_front(transition, transition.begin());
+
+	dive();
+
+	if (m_position.size() < m_min
+		|| m_position.front().second->first != ZERO)
+	{
+		++*this;
+	}
+}
+
+MarkovChain::Iterator::Iterator(const MarkovChain& chain):
+	m_chain(chain),
+	m_min(0),
+	m_max(0)
+{
+	// corresponds to the end()
+}
+
+void MarkovChain::Iterator::operator++()
+{
+	do
+	{
+		roll();
+		dive();
+	} while (!m_position.empty()
+		&& (m_position.size() < m_min
+			|| m_position.front().second->first != ZERO));
+}
+
+std::string MarkovChain::Iterator::operator*() const
+{
+	std::stringstream result;
+	for (auto p_i = m_position.rbegin(); p_i != m_position.rend(); ++p_i)
+	{
+		if (ZERO != p_i->second->first)
+		{
+			result << p_i->second->first;
+		}
+	}
+	return result.str();
+}
+
+void MarkovChain::Iterator::roll()
+{
+	if (m_position.empty())
+	{
+		return;	// at the end
+	}
+
+	auto last = &m_position.front();
+	do
+	{
+		while (last->second == last->first.end()
+			&& !m_position.empty())
+		{
+			m_position.pop_front();
+			if (m_position.empty())
+			{
+				return;
+			}
+
+			last = &m_position.front();
+
+			// get back to previous state
+			m_state.push_front(m_popped.top());
+			m_popped.pop();
+		}
+
+		if (m_position.empty())
+		{
+			return;
+		}
+
+		++last->second;
+	} while (last->second == last->first.end());
+}
+
+void MarkovChain::Iterator::dive()
+{
+	if (m_position.empty())
+	{
+		return;
+	}
+
+	auto last = &m_position.front();
+	if (last->second == last->first.end())
+	{
+		throw std::logic_error("dive without roll.");
+	}
+
+	while (last->second->first != ZERO
+		&& m_position.size() < m_max)
+	{
+		m_popped.push(m_state.push_back(last->second->first));
+
+		const transition_t& transition = m_chain.transition(m_state);
+		m_position.emplace_front(transition, transition.begin());
+		last = &m_position.front();
+	}
+}
+
+void MarkovChain::Transition::add(const item_t& item)
+{
+	auto transition_i = m_item_to_frequency.find(item);
+	if (m_item_to_frequency.end() == transition_i)
+	{
+		m_item_to_frequency[item] = 1;
+	}
+	else
+	{
+		++transition_i->second;
+	}
+
+	m_frequencies.clear();
+}
+
+bool MarkovChain::Transition::operator==(const Transition& rhv) const
+{
+	return m_count == rhv.m_count
+		&& m_item_to_frequency == rhv.m_item_to_frequency;
+}
+
+MarkovChain::Transition::frequencies_t::const_iterator MarkovChain::Transition::begin() const
+{
+	if (0 == m_frequencies.size())
+	{
+		build_frequencies();
+	}
+
+	return m_frequencies.begin();
+}
+
+MarkovChain::Transition::frequencies_t::const_iterator MarkovChain::Transition::end() const
+{
+	if (0 == m_frequencies.size())
+	{
+		build_frequencies();
+	}
+
+	return m_frequencies.end();
+}
+
+void MarkovChain::Transition::build_frequencies() const
+{
+	m_frequencies.reserve(m_item_to_frequency.size());
+	for (const auto& i : m_item_to_frequency)
+	{
+		m_frequencies.push_back(i);
+	}
+
+	std::sort(m_frequencies.begin(), m_frequencies.end(),
+		[](const auto& a, const auto& b) { return a.second > b.second; });
+}
+
 template<typename T>
-MarkovGraph::MarkovGraph(const T& iterable)
+MarkovChain::MarkovChain(const T& iterable)
 {
 	for (auto i = iterable.begin(); i != iterable.end(); ++i)
 	{
 		const input_t input = *i;
 		add_input(input);
-		used.insert(*i);
 	}
 }
 
-bool MarkovGraph::generate()
+void MarkovChain::random()
 {
 	std::string result;
-	bool passed_check = false;
-	int attempt = 0;
-	do
-	{
-		++attempt;
-		result.clear();
-		iteration(result);
-		passed_check = check(result);
-	} while (!passed_check && 100 > attempt);
 
-	if (passed_check)
-	{
-		std::cout << result << std::endl;
-		used.insert(result);
-	}
-	else
-	{
-		std::cout << "Solution has not been bound after " << attempt << " attempts." << std::endl;
-	}
+	iteration(result);
 
-	return passed_check;
+	std::cout << result << std::endl;
 }
 
-void MarkovGraph::add_state(const State& state, const item_t& i)
+void MarkovChain::add_state(const State& state, const item_t& i)
 {
-	const auto state_i = m_graph.find(state);
-	if (m_graph.end() == state_i)
+	const auto state_i = m_chain.find(state);
+	if (m_chain.end() == state_i)
 	{
 		transition_t transition;
-		transition[i] = 1;
-		m_graph.emplace(state, transition);
+		transition.add(i);
+		m_chain.emplace(state, transition);
 
 		return;
 	}
 
 	transition_t& transition = state_i->second;
-	auto transition_i = transition.find(i);
-	if (transition.end() == transition_i)
-	{
-		transition[i] = 1;
-
-		return;
-	}
-
-	++transition_i->second;
+	transition.add(i);
 }
 
-void MarkovGraph::add_input(const input_t& input)
+void MarkovChain::add_input(const input_t& input)
 {
 	State state;
 	for (std::size_t i = 0; input[i] != ZERO; ++i)
 	{
 		add_state(state, input[i]);
 
-		state.push(input[i]);
+		state.push_back(input[i]);
 	}
 
 	add_state(state, ZERO);
 }
 
-void MarkovGraph::iteration(std::string& result) const
+void MarkovChain::iteration(std::string& result) const
 {
 	State state;
 	do
 	{
-		const auto i = m_graph.find(state);
-		if (i == m_graph.end())
+		const auto i = m_chain.find(state);
+		if (i == m_chain.end())
 		{
 			throw std::logic_error("No transition.");
 		}
@@ -215,7 +441,7 @@ void MarkovGraph::iteration(std::string& result) const
 					result.push_back(s.first);
 				}
 
-				state.push(s.first);
+				state.push_back(s.first);
 				found = true;
 				break;
 			}
@@ -228,28 +454,8 @@ void MarkovGraph::iteration(std::string& result) const
 	} while (ZERO != state(0));
 }
 
-bool MarkovGraph::check(const std::string& name) const
-{
-	if (5 > name.length())
-	{
-		return false;
-	}
-
-	if (10 < name.length())
-	{
-		return false;
-	}
-
-	if (used.find(name) != used.end())
-	{
-		return false;
-	}
-
-	return true;
-}
-
-bool read_file(const char* file_name, std::list<std::string>&
-	names)
+using samples_t = std::list<std::string>;
+bool read_file(const char* file_name, samples_t& names)
 {
 	std::ifstream ifs(file_name);
 	if (!ifs.is_open())
@@ -266,26 +472,72 @@ bool read_file(const char* file_name, std::list<std::string>&
 	return true;
 }
 
+void random(MarkovChain& chain)
+{
+	std::srand(static_cast<unsigned>(time(nullptr)));
+	chain.random();
+}
+
+void enumerate(MarkovChain& chain, const samples_t& samples)
+{
+	std::unordered_set<std::string> used;
+	for (const auto& s : samples)
+	{
+		used.insert(s);
+	}
+
+	int count = 0;
+	auto i = chain.begin(5, 10);
+	while (i != chain.end())
+	{
+		const std::string name = *i;
+
+		if (used.find(name) == used.end())
+		{
+			std::cout << (++count) << ". " << name << std::endl;
+		}
+		++i;
+	}
+}
+
 int main(int argc, char** argv)
 {
-	if (0 == argc)
+	enum Mode
 	{
-		std::cerr << "Usage: " << argv[0] << " <name of the file with samples>" << std::endl;
+		RANDOM,
+		ALL
+	} mode = ALL;
+
+	if (2 > argc)
+	{
+		std::cerr << "Usage: " << argv[0] << " <name of the file with samples> [-r]" << std::endl;
 		return 1;
 	}
 
-	std::list<std::string> names;
+	samples_t names;
 	if (!read_file(argv[1], names))
 	{
 		perror("couldn't read from file");
 		return 1;
 	}
 
-	MarkovGraph graph(names);
+	if (3 == argc && 0 == strcmp("-r", argv[2]))
+	{
+		mode = RANDOM;
+	}
 
-	int counter = 0;
-	std::srand(time(nullptr));
-	while (graph.generate() && ++counter != 25);
+	MarkovChain chain(names);
+
+	switch (mode)
+	{
+	case RANDOM:
+		random(chain);
+		break;
+
+	case ALL:
+		enumerate(chain, names);
+		break;
+	}
 
 	return 0;
 }
