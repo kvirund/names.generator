@@ -37,9 +37,16 @@ struct State
 	item_t push_back(const item_t& item);
 	item_t push_front(const item_t& item);
 
+	void clear();
+
 private:
 	item_t m_state[ORDER];
 };
+
+std::ostream& operator<<(std::ostream& os, const State& state)
+{
+	return state.dump(os);
+}
 
 std::size_t State::Hash::operator()(const State& state) const noexcept
 {
@@ -66,10 +73,7 @@ std::size_t State::Hash::operator()(const State& state) const noexcept
 
 State::State()
 {
-	for (std::size_t i = 0; i != ORDER; ++i)
-	{
-		m_state[i] = ZERO;
-	}
+	clear();
 }
 
 bool State::operator==(const State& other) const
@@ -124,6 +128,14 @@ item_t State::push_front(const item_t& item)
 	return result;
 }
 
+void State::clear()
+{
+	for (std::size_t i = 0; i != ORDER; ++i)
+	{
+		m_state[i] = ZERO;
+	}
+}
+
 class MarkovChain
 {
 public:
@@ -133,20 +145,22 @@ public:
 		using frequency_t = std::pair<item_t, int>;
 		using frequencies_t = std::vector<frequency_t>;
 
-		Transition() : m_count(0) {}
+		Transition() {}
 
 		void add(const item_t& item);
-		int count() const { return m_count; }
+		auto count() const { return m_item_to_frequency.size(); }
 
 		bool operator==(const Transition& rhv) const;
 
 		frequencies_t::const_iterator begin() const;
 		frequencies_t::const_iterator end() const;
 
+		void refine(const int threshold);
+		const item_t& get(const std::size_t index) const;
+
 	private:
 		void build_frequencies() const;
 
-		int m_count;
 		std::unordered_map<item_t, int> m_item_to_frequency;
 		mutable frequencies_t m_frequencies;
 	};
@@ -182,7 +196,7 @@ public:
 	};
 
 	template<typename T>
-	MarkovChain(const T& iterable);
+	MarkovChain(const T& iterable, const bool add_zero = true);
 
 	void random();
 
@@ -191,14 +205,72 @@ public:
 
 private:
 	void add_state(const State& state, const item_t& i);
-	void add_input(const input_t& input);
+	void add_input(const input_t& input, const bool add_zero);
 
 	void iteration(std::string& result) const;
 
 	const transition_t& transition(const State& state) const { return m_chain.at(state); }
 
+protected:
 	std::unordered_map<State, transition_t, State::Hash> m_chain;
 };
+
+class NumberEncoder : public MarkovChain
+{
+public:
+	template<typename T>
+	NumberEncoder(const T& words, const int threshold = 15) : MarkovChain(words, false)
+	{
+		refine(threshold);
+	}
+
+	bool encode(int number, std::string& result);
+
+private:
+	void refine(const int threshold);
+};
+
+bool NumberEncoder::encode(int number, std::string& result)
+{
+	std::stringstream ss;
+
+	int offset = 0;
+	State state;
+	while (0 < number)
+	{
+		auto transition_i = m_chain.find(state);
+
+		if (m_chain.end() == transition_i)
+		{
+			std::cerr << "Logic error: didn't find transition for the state " << state << std::endl;
+			return false;
+		}
+
+		if (0 == transition_i->second.count())
+		{
+			state.clear();
+			transition_i = m_chain.find(state);
+		}
+
+		const auto transition = transition_i->second;
+		const auto index = (number + offset) % transition.count();
+		ss << transition.get(index);
+		number /= static_cast<int>(transition.count());
+		++offset;
+	}
+
+	result = ss.str();
+
+	return true;
+}
+
+void NumberEncoder::refine(const int threshold)
+{
+	for (auto& t : m_chain)
+	{
+		t.second.refine(threshold);
+	}
+}
 
 MarkovChain::Iterator::Iterator(const MarkovChain& chain, const int min, const int max) :
 	m_chain(chain),
@@ -325,8 +397,7 @@ void MarkovChain::Transition::add(const item_t& item)
 
 bool MarkovChain::Transition::operator==(const Transition& rhv) const
 {
-	return m_count == rhv.m_count
-		&& m_item_to_frequency == rhv.m_item_to_frequency;
+	return m_item_to_frequency == rhv.m_item_to_frequency;
 }
 
 MarkovChain::Transition::frequencies_t::const_iterator MarkovChain::Transition::begin() const
@@ -349,8 +420,32 @@ MarkovChain::Transition::frequencies_t::const_iterator MarkovChain::Transition::
 	return m_frequencies.end();
 }
 
+void MarkovChain::Transition::refine(const int threshold)
+{
+	build_frequencies();
+
+	for (auto i = threshold; i < m_frequencies.size(); ++i)
+	{
+		m_item_to_frequency.erase(m_frequencies[i].first);
+	}
+
+	m_frequencies.clear();
+}
+
+const item_t& MarkovChain::Transition::get(const std::size_t index) const
+{
+	build_frequencies();
+
+	return m_frequencies[index].first;
+}
+
 void MarkovChain::Transition::build_frequencies() const
 {
+	if (!m_frequencies.empty())
+	{
+		return;
+	}
+
 	m_frequencies.reserve(m_item_to_frequency.size());
 	for (const auto& i : m_item_to_frequency)
 	{
@@ -362,12 +457,12 @@ void MarkovChain::Transition::build_frequencies() const
 }
 
 template<typename T>
-MarkovChain::MarkovChain(const T& iterable)
+MarkovChain::MarkovChain(const T& iterable, const bool add_zero)
 {
 	for (auto i = iterable.begin(); i != iterable.end(); ++i)
 	{
 		const input_t input = *i;
-		add_input(input);
+		add_input(input, add_zero);
 	}
 }
 
@@ -396,7 +491,7 @@ void MarkovChain::add_state(const State& state, const item_t& i)
 	transition.add(i);
 }
 
-void MarkovChain::add_input(const input_t& input)
+void MarkovChain::add_input(const input_t& input, const bool add_zero)
 {
 	State state;
 	for (std::size_t i = 0; input[i] != ZERO; ++i)
@@ -406,7 +501,10 @@ void MarkovChain::add_input(const input_t& input)
 		state.push_back(input[i]);
 	}
 
-	add_state(state, ZERO);
+	if (add_zero)
+	{
+		add_state(state, ZERO);
+	}
 }
 
 void MarkovChain::iteration(std::string& result) const
@@ -500,22 +598,64 @@ void enumerate(MarkovChain& chain, const samples_t& samples)
 	}
 }
 
+enum Mode
+{
+	RANDOM,
+	ALL
+};
+
+int generate(const samples_t& samples, const Mode mode)
+{
+	MarkovChain chain(samples);
+
+	switch (mode)
+	{
+	case RANDOM:
+		random(chain);
+		break;
+
+	case ALL:
+		enumerate(chain, samples);
+		break;
+	}
+
+	return 0;
+}
+
+using int_list_t = std::list<int>;
+int encode(const samples_t& samples, const int_list_t& numbers)
+{
+	NumberEncoder encoder(samples);
+
+	std::string result;
+	for (const auto& number : numbers)
+	{
+		unsigned value = number;
+		for (int i = 0; i != 8; ++i)
+		{
+			value ^= 0b10011010;
+			value = ((value << 1) & (~0u >> 1)) | (value >> (8*sizeof(value) - 2));
+		}
+
+		encoder.encode(value, result);
+		std::cout << "Number " << number << ": '" << result << "'" << std::endl;
+	}
+
+	return 0;
+}
+
 int main(int argc, char** argv)
 {
-	enum Mode
-	{
-		RANDOM,
-		ALL
-	} mode = ALL;
+	Mode mode = ALL;
 
 	if (2 > argc)
 	{
-		std::cerr << "Usage: " << argv[0] << " <name of the file with samples> [-r]" << std::endl;
+		std::cerr << "Usage: " << argv[0] << " <name of the file with samples> [-r | -e <number>]" << std::endl;
 		return 1;
 	}
 
-	samples_t names;
-	if (!read_file(argv[1], names))
+	samples_t samples;
+	if (!read_file(argv[1], samples))
 	{
 		perror("couldn't read from file");
 		return 1;
@@ -525,19 +665,31 @@ int main(int argc, char** argv)
 	{
 		mode = RANDOM;
 	}
-
-	MarkovChain chain(names);
-
-	switch (mode)
+	
+	if (4 == argc && 0 == strcmp("-e", argv[2]))
 	{
-	case RANDOM:
-		random(chain);
-		break;
+		constexpr auto delimiter = ',';
 
-	case ALL:
-		enumerate(chain, names);
-		break;
+		int_list_t numbers;
+		const auto dot_pos = std::strchr(argv[3], delimiter);
+		if (nullptr == dot_pos)
+		{
+			const auto number = static_cast<int>(std::strtoul(argv[3], nullptr, 10));
+			numbers.push_back(std::abs(number));
+		}
+		else
+		{
+			std::string number_str;
+			std::istringstream stream(argv[3]);
+			while (std::getline(stream, number_str, delimiter))
+			{
+				const auto number = static_cast<int>(std::strtoul(number_str.c_str(), nullptr, 10));
+				numbers.push_back(number);
+			}
+		}
+
+		return encode(samples, numbers);
 	}
 
-	return 0;
+	return generate(samples, mode);
 }
