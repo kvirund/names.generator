@@ -17,10 +17,25 @@ using item_t = char;
 using input_t = std::string;
 
 constexpr item_t ZERO = '\0';
+constexpr int THRESHOLD = 10; // std::numeric_limits<int>::max();
+
+class NullStream : public std::ostream
+{
+	class NullBuffer : public std::streambuf
+	{
+	public:
+		int overflow(int c) { return c; }
+	} m_nb;
+
+public:
+	NullStream() : std::ostream(&m_nb) {}
+} null;
+
+std::ostream& trace = null;
 
 struct State
 {
-	constexpr static int ORDER = 3;
+	constexpr static int ORDER = 4;
 
 	struct Hash
 	{
@@ -30,6 +45,7 @@ struct State
 	State();
 
 	char operator()(const std::size_t n) const { return m_state[ORDER - n - 1]; }
+	char& operator[](const std::size_t n) { return m_state[ORDER - n - 1]; }
 	bool operator==(const State& other) const;
 
 	std::ostream& dump(std::ostream& os) const;
@@ -93,8 +109,14 @@ std::ostream& State::dump(std::ostream& os) const
 {
 	for (const auto& i : m_state)
 	{
-		os << std::hex << " 0x" << std::setw(2) << std::setfill('0')
-			<< static_cast<unsigned>(static_cast<unsigned char>(i));
+		if (0 != i)
+		{
+			os << static_cast<char>(i);
+		}
+		else
+		{
+			os << "\\x00";
+		}
 	}
 
 	return os;
@@ -144,6 +166,7 @@ public:
 	public:
 		using frequency_t = std::pair<item_t, int>;
 		using frequencies_t = std::vector<frequency_t>;
+		using const_iterator = frequencies_t::const_iterator;
 
 		Transition() {}
 
@@ -215,11 +238,16 @@ protected:
 	std::unordered_map<State, transition_t, State::Hash> m_chain;
 };
 
+std::ostream& operator<<(std::ostream& os, const MarkovChain::Transition::frequency_t& freq)
+{
+	return os << freq.first;
+}
+
 class NumberEncoder : public MarkovChain
 {
 public:
 	template<typename T>
-	NumberEncoder(const T& words, const int threshold = 15) : MarkovChain(words, false)
+	NumberEncoder(const T& words, const int threshold = THRESHOLD) : MarkovChain(words, false)
 	{
 		refine(threshold);
 	}
@@ -230,32 +258,67 @@ private:
 	void refine(const int threshold);
 };
 
+template <typename ListType>
+std::string joinList(const ListType& list, const char delimiter = ',')
+{
+	std::stringstream result;
+	bool first = true;
+	for (typename ListType::const_iterator i = list.begin(); i != list.end(); ++i)
+	{
+		if (!first)
+		{
+			result << delimiter;
+		}
+		result << *i;
+		first = false;
+	}
+	return result.str();
+}
+
 bool NumberEncoder::encode(int number, std::string& result)
 {
+	trace << "Encoding number " << number << std::endl;
+
 	std::stringstream ss;
 
-	int offset = 0;
 	State state;
 	while (0 < number)
 	{
 		auto transition_i = m_chain.find(state);
+		{
+			std::size_t offset = 0;
+			while (m_chain.end() == transition_i
+				&& State::ORDER != offset)
+			{
+				if (m_chain.end() == transition_i)
+				{
+					state[offset++] = ZERO;
+					transition_i = m_chain.find(state);
+				}
+			}
+		}
 
 		if (m_chain.end() == transition_i)
 		{
-			std::cerr << "Logic error: didn't find transition for the state " << state << std::endl;
+			std::cerr << "Logic error: transition not found." << std::endl;
 			return false;
 		}
 
-		if (0 == transition_i->second.count())
-		{
-			state.clear();
-			transition_i = m_chain.find(state);
-		}
+		int offset = 0;
 
 		const auto transition = transition_i->second;
+		trace << "State " << state << " -> " << joinList(transition, ',') << std::endl;
+
 		const auto index = (number + offset) % transition.count();
-		ss << transition.get(index);
+		trace << "Index = " << index << " (" << number << " + " << offset << " % " << transition.count() << ")"
+			<< std::endl;
+
+		const auto item = transition.get(index);
+		ss << item;
+		state.push_back(item);
 		number /= static_cast<int>(transition.count());
+		trace << "New number: " << number << std::endl;
+
 		++offset;
 	}
 
@@ -631,11 +694,13 @@ int encode(const samples_t& samples, const int_list_t& numbers)
 	for (const auto& number : numbers)
 	{
 		unsigned value = number;
+		/*
 		for (int i = 0; i != 8; ++i)
 		{
 			value ^= 0b10011010;
 			value = ((value << 1) & (~0u >> 1)) | (value >> (8*sizeof(value) - 2));
 		}
+		*/
 
 		encoder.encode(value, result);
 		std::cout << "Number " << number << ": '" << result << "'" << std::endl;
